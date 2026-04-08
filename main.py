@@ -243,6 +243,8 @@ def _playwright_sync() -> list[dict]:
 
             # Step 2: fetch all venues from the same page (inherits cookies)
             results = []
+            success_count = 0
+            fail_count = 0
             for venue in VENUES:
                 try:
                     payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
@@ -251,17 +253,24 @@ def _playwright_sync() -> list[dict]:
                         """async (url) => {
                             try {
                                 const r = await fetch(url, {headers: {"Accept": "application/json"}});
-                                if (!r.ok) return null;
+                                if (!r.ok) return {"_status": r.status};
                                 return await r.json();
-                            } catch(e) { return null; }
+                            } catch(e) { return {"_error": e.toString()}; }
                         }""",
                         url,
                     )
-                    if data:
+                    if data and "_status" not in data and "_error" not in data:
                         raw = data.get("result", {}).get("data", {}).get("json", [])
                         results.append({"venue": venue, "slots": raw})
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                        if fail_count <= 3:
+                            log.warning(f"API call failed for {venue['name']}: {data}")
                 except Exception as e:
+                    fail_count += 1
                     log.debug(f"Skipping {venue['name']}: {e}")
+            log.info(f"Venue fetch complete: {success_count} ok, {fail_count} failed")
 
             await cf_page.close()
             await browser.close()
@@ -330,10 +339,12 @@ scheduler = AsyncIOScheduler(timezone=str(SGT))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await refresh_cache()
+    # Start scheduler first so the server binds to port immediately
     scheduler.add_job(refresh_cache, "interval", minutes=REFRESH_INTERVAL_MINUTES)
     scheduler.start()
     log.info(f"Scheduler started — refreshing every {REFRESH_INTERVAL_MINUTES} minutes")
+    # Trigger first refresh in background — don't block startup
+    asyncio.create_task(refresh_cache())
     yield
     scheduler.shutdown()
 
