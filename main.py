@@ -1,4 +1,4 @@
-import sys
+import os
 import json
 import asyncio
 import logging
@@ -6,11 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 
-# Windows: ProactorEventLoop lets asyncio spawn subprocesses (Chromium)
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
-from playwright.async_api import async_playwright
+from curl_cffi.requests import AsyncSession
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -19,16 +15,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# Install Chromium at startup if not present (needed on Render)
-import subprocess as _sp
-import sys as _sys
-_sp.run([_sys.executable, "-m", "playwright", "install", "chromium"],
-        check=False, capture_output=False)
-
 SGT = ZoneInfo("Asia/Singapore")
 ACTIVITY_ID = "YLONatwvqJfikKOmB5N9U"
 BASE_URL = "https://activesg.gov.sg/api/trpc/schedule.listAvailable"
-CONCURRENCY = 8
+CONCURRENCY = 12
 REFRESH_INTERVAL_MINUTES = 10
 
 VENUES = [
@@ -180,123 +170,71 @@ VENUES = [
     {"id": "8xQCe0Lzl4RXK40l4ZLU7", "name": "Zhonghua Secondary School Hall", "address": "13 Serangoon Avenue 3", "type": "DUS"},
 ]
 
-# ── In-memory cache ───────────────────────────────────────────────────────────
+# ── Cache ─────────────────────────────────────────────────────────────────────
 
-cache: dict = {
-    "data": {},
-    "last_refreshed": None,
-    "is_refreshing": False,
-    "error": None,
-}
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
+cache: dict = {"data": {}, "last_refreshed": None, "is_refreshing": False, "error": None}
 
 def ts_to_sgt(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=SGT).strftime("%H:%M")
 
-# ── Playwright fetcher ────────────────────────────────────────────────────────
+def get_proxy() -> str | None:
+    full = os.environ.get("PROXY_URL")
+    if full:
+        return full
+    host = os.environ.get("PROXY_HOST")
+    port = os.environ.get("PROXY_PORT")
+    user = os.environ.get("PROXY_USER")
+    pwd  = os.environ.get("PROXY_PASS")
+    if host and port:
+        if user and pwd:
+            return f"http://{user}:{pwd}@{host}:{port}"
+        return f"http://{host}:{port}"
+    return None
 
-def _playwright_sync() -> list[dict]:
-    """
-    Runs entirely in its own thread + event loop.
-    1. Launches Chromium headlessly
-    2. Visits ActiveSG to get cf_clearance cookie
-    3. Fetches all venue slots via page.evaluate() (runs JS fetch in-browser)
-    4. Returns raw results list
-    """
-    import asyncio as _asyncio
-    import urllib.parse as _urlparse
+# ── Fetcher ───────────────────────────────────────────────────────────────────
 
-    async def _inner():
-        async with async_playwright() as p:
-            import shutil as _shutil
-            args = ["--no-sandbox", "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage", "--disable-gpu"]
-            launch_kw: dict = {"headless": True, "args": args}
-            for candidate in ["google-chrome", "google-chrome-stable",
-                               "chromium-browser", "chromium"]:
-                path = _shutil.which(candidate)
-                if path:
-                    launch_kw["executable_path"] = path
-                    log.info(f"Using system browser: {path}")
-                    break
-            browser = await p.chromium.launch(**launch_kw)
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-            )
-
-            # Step 1: visit site to get cf_clearance cookie
-            log.info("Visiting ActiveSG to pass Cloudflare challenge...")
-            cf_page = await context.new_page()
-            await cf_page.goto(
-                f"https://activesg.gov.sg/facility-bookings/activities/{ACTIVITY_ID}/venues",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            await cf_page.wait_for_timeout(3000)
-            log.info("Cloudflare passed — fetching all venues...")
-
-            # Step 2: fetch all venues from the same page (inherits cookies)
-            results = []
-            success_count = 0
-            fail_count = 0
-            api_page = await context.new_page()
-            for venue in VENUES:
-                try:
-                    payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
-                    url = f"{BASE_URL}?input={_urlparse.quote(payload)}"
-                    # Navigate to API URL directly — treated as a real browser
-                    # navigation by Cloudflare, not a fetch/XHR call
-                    response = await api_page.goto(url, wait_until="domcontentloaded", timeout=15000)
-                    if response and response.ok:
-                        body = await api_page.evaluate("() => document.body.innerText")
-                        data = json.loads(body)
-                        raw = data.get("result", {}).get("data", {}).get("json", [])
-                        results.append({"venue": venue, "slots": raw})
-                        success_count += 1
-                    else:
-                        fail_count += 1
-                        status = response.status if response else "no response"
-                        if fail_count <= 3:
-                            log.warning(f"API failed for {venue['name']}: HTTP {status}")
-                except Exception as e:
-                    fail_count += 1
-                    if fail_count <= 3:
-                        log.warning(f"Skipping {venue['name']}: {e}")
-            await api_page.close()
-            log.info(f"Venue fetch complete: {success_count} ok, {fail_count} failed")
-
-            await cf_page.close()
-            await browser.close()
-            return results
-
-    loop = _asyncio.new_event_loop()
-    _asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_inner())
-    finally:
-        loop.close()
-        _asyncio.set_event_loop(None)
-
+async def fetch_venue(session: AsyncSession, venue: dict, sem: asyncio.Semaphore) -> dict | None:
+    async with sem:
+        try:
+            payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
+            r = await session.get(BASE_URL, params={"input": payload}, timeout=20)
+            if r.status_code != 200:
+                log.debug(f"HTTP {r.status_code} for {venue['name']}")
+                return None
+            data = r.json()
+            raw = data.get("result", {}).get("data", {}).get("json", [])
+            return {"venue": venue, "slots": raw}
+        except Exception as e:
+            log.debug(f"Error fetching {venue['name']}: {e}")
+            return None
 
 async def refresh_cache():
     if cache["is_refreshing"]:
         return
     cache["is_refreshing"] = True
-    log.info("Starting cache refresh via Playwright...")
+    log.info("Starting cache refresh...")
     start = datetime.now(SGT)
     new_data: dict = {}
 
-    try:
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(None, _playwright_sync)
+    proxy = get_proxy()
+    if proxy:
+        masked = proxy.split("@")[-1] if "@" in proxy else proxy
+        log.info(f"Using proxy: {masked}")
+    else:
+        log.info("No proxy — direct connection")
 
+    try:
+        proxy_dict = {"http": proxy, "https": proxy} if proxy else None
+        sem = asyncio.Semaphore(CONCURRENCY)
+        async with AsyncSession(impersonate="chrome120", proxies=proxy_dict) as session:
+            tasks = [fetch_venue(session, v, sem) for v in VENUES]
+            results = await asyncio.gather(*tasks)
+
+        ok = 0
         for result in results:
+            if not result:
+                continue
+            ok += 1
             venue = result["venue"]
             for entry in result["slots"]:
                 date_str, slot_info = entry[0], entry[1]
@@ -313,10 +251,8 @@ async def refresh_cache():
                     })
                 if timeslots:
                     new_data.setdefault(date_str, []).append({
-                        "id": venue["id"],
-                        "name": venue["name"],
-                        "address": venue["address"],
-                        "type": venue["type"],
+                        "id": venue["id"], "name": venue["name"],
+                        "address": venue["address"], "type": venue["type"],
                         "timeslots": timeslots,
                     })
 
@@ -324,7 +260,7 @@ async def refresh_cache():
         cache["last_refreshed"] = datetime.now(SGT).isoformat()
         cache["error"] = None
         elapsed = (datetime.now(SGT) - start).total_seconds()
-        log.info(f"Cache refreshed in {elapsed:.1f}s — {len(new_data)} dates cached")
+        log.info(f"Cache refreshed in {elapsed:.1f}s — {ok}/{len(VENUES)} venues ok, {len(new_data)} dates cached")
 
     except Exception as e:
         cache["error"] = str(e)
@@ -338,11 +274,8 @@ scheduler = AsyncIOScheduler(timezone=str(SGT))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start scheduler first so the server binds to port immediately
     scheduler.add_job(refresh_cache, "interval", minutes=REFRESH_INTERVAL_MINUTES)
     scheduler.start()
-    log.info(f"Scheduler started — refreshing every {REFRESH_INTERVAL_MINUTES} minutes")
-    # Trigger first refresh in background — don't block startup
     asyncio.create_task(refresh_cache())
     yield
     scheduler.shutdown()
@@ -371,25 +304,15 @@ async def get_slots(
         if timeslots:
             results.append({**venue, "timeslots": timeslots})
     results.sort(key=lambda x: x["name"])
-    return {
-        "date": date,
-        "results": results,
-        "total_venues": len(results),
-        "last_refreshed": cache["last_refreshed"],
-        "is_refreshing": cache["is_refreshing"],
-        "error": cache["error"],
-    }
+    return {"date": date, "results": results, "total_venues": len(results),
+            "last_refreshed": cache["last_refreshed"], "is_refreshing": cache["is_refreshing"],
+            "error": cache["error"]}
 
 @app.get("/api/status")
 async def get_status():
-    return {
-        "last_refreshed": cache["last_refreshed"],
-        "is_refreshing": cache["is_refreshing"],
-        "dates_cached": sorted(cache["data"].keys()),
-        "total_venues": len(VENUES),
-        "error": cache["error"],
-        "refresh_interval_minutes": REFRESH_INTERVAL_MINUTES,
-    }
+    return {"last_refreshed": cache["last_refreshed"], "is_refreshing": cache["is_refreshing"],
+            "dates_cached": sorted(cache["data"].keys()), "total_venues": len(VENUES),
+            "error": cache["error"], "refresh_interval_minutes": REFRESH_INTERVAL_MINUTES}
 
 @app.post("/api/refresh")
 async def trigger_refresh():

@@ -2,6 +2,15 @@ services:
   - type: web
     name: activesg-badminton-slots
     runtime: python
-    buildCommand: pip install -r requirements.txt && playwright install chromium
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
+    envVars:
+      - key: PROXY_HOST
+        sync: false
+      - key: PROXY_PORT
+        sync: false
+      - key: PROXY_USER
+        sync: false
+      - key: PROXY_PASS
+        sync: false
