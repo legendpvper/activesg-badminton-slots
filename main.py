@@ -245,31 +245,30 @@ def _playwright_sync() -> list[dict]:
             results = []
             success_count = 0
             fail_count = 0
+            api_page = await context.new_page()
             for venue in VENUES:
                 try:
                     payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
                     url = f"{BASE_URL}?input={_urlparse.quote(payload)}"
-                    data = await cf_page.evaluate(
-                        """async (url) => {
-                            try {
-                                const r = await fetch(url, {headers: {"Accept": "application/json"}});
-                                if (!r.ok) return {"_status": r.status};
-                                return await r.json();
-                            } catch(e) { return {"_error": e.toString()}; }
-                        }""",
-                        url,
-                    )
-                    if data and "_status" not in data and "_error" not in data:
+                    # Navigate to API URL directly — treated as a real browser
+                    # navigation by Cloudflare, not a fetch/XHR call
+                    response = await api_page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    if response and response.ok:
+                        body = await api_page.evaluate("() => document.body.innerText")
+                        data = json.loads(body)
                         raw = data.get("result", {}).get("data", {}).get("json", [])
                         results.append({"venue": venue, "slots": raw})
                         success_count += 1
                     else:
                         fail_count += 1
+                        status = response.status if response else "no response"
                         if fail_count <= 3:
-                            log.warning(f"API call failed for {venue['name']}: {data}")
+                            log.warning(f"API failed for {venue['name']}: HTTP {status}")
                 except Exception as e:
                     fail_count += 1
-                    log.debug(f"Skipping {venue['name']}: {e}")
+                    if fail_count <= 3:
+                        log.warning(f"Skipping {venue['name']}: {e}")
+            await api_page.close()
             log.info(f"Venue fetch complete: {success_count} ok, {fail_count} failed")
 
             await cf_page.close()
