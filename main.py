@@ -1,9 +1,14 @@
+import sys
 import json
 import asyncio
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
+
+# Windows: ProactorEventLoop lets asyncio spawn subprocesses (Chromium)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from playwright.async_api import async_playwright
 from fastapi import FastAPI, Query
@@ -185,47 +190,76 @@ def ts_to_sgt(ms: int) -> str:
 
 # ── Playwright fetcher ────────────────────────────────────────────────────────
 
-async def fetch_all_venues(context) -> list[dict]:
+def _playwright_sync() -> list[dict]:
     """
-    Fire all venue API calls from within the browser context using page.evaluate().
-    The browser already has a valid cf_clearance cookie from the initial page visit,
-    so these fetch() calls pass Cloudflare without any issues.
+    Runs entirely in its own thread + event loop.
+    1. Launches Chromium headlessly
+    2. Visits ActiveSG to get cf_clearance cookie
+    3. Fetches all venue slots via page.evaluate() (runs JS fetch in-browser)
+    4. Returns raw results list
     """
-    sem = asyncio.Semaphore(CONCURRENCY)
-    page = await context.new_page()
+    import asyncio as _asyncio
+    import urllib.parse as _urlparse
 
-    async def fetch_one(venue: dict) -> dict | None:
-        async with sem:
-            try:
-                import urllib.parse
-                payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
-                url = f"{BASE_URL}?input={urllib.parse.quote(payload)}"
-                result = await page.evaluate(
-                    """async (url) => {
-                        try {
-                            const r = await fetch(url, {
-                                headers: { "Accept": "application/json" }
-                            });
-                            if (!r.ok) return null;
-                            return await r.json();
-                        } catch (e) {
-                            return null;
-                        }
-                    }""",
-                    url,
-                )
-                if not result:
-                    return None
-                raw = result.get("result", {}).get("data", {}).get("json", [])
-                return {"venue": venue, "slots": raw}
-            except Exception as e:
-                log.debug(f"Error fetching {venue['name']}: {e}")
-                return None
+    async def _inner():
+        async with async_playwright() as p:
+            # No --single-process on Windows — causes premature browser close
+            args = ["--no-sandbox", "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage", "--disable-gpu"]
+            browser = await p.chromium.launch(headless=True, args=args)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
 
-    tasks = [fetch_one(v) for v in VENUES]
-    results = await asyncio.gather(*tasks)
-    await page.close()
-    return [r for r in results if r]
+            # Step 1: visit site to get cf_clearance cookie
+            log.info("Visiting ActiveSG to pass Cloudflare challenge...")
+            cf_page = await context.new_page()
+            await cf_page.goto(
+                f"https://activesg.gov.sg/facility-bookings/activities/{ACTIVITY_ID}/venues",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await cf_page.wait_for_timeout(3000)
+            log.info("Cloudflare passed — fetching all venues...")
+
+            # Step 2: fetch all venues from the same page (inherits cookies)
+            results = []
+            for venue in VENUES:
+                try:
+                    payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
+                    url = f"{BASE_URL}?input={_urlparse.quote(payload)}"
+                    data = await cf_page.evaluate(
+                        """async (url) => {
+                            try {
+                                const r = await fetch(url, {headers: {"Accept": "application/json"}});
+                                if (!r.ok) return null;
+                                return await r.json();
+                            } catch(e) { return null; }
+                        }""",
+                        url,
+                    )
+                    if data:
+                        raw = data.get("result", {}).get("data", {}).get("json", [])
+                        results.append({"venue": venue, "slots": raw})
+                except Exception as e:
+                    log.debug(f"Skipping {venue['name']}: {e}")
+
+            await cf_page.close()
+            await browser.close()
+            return results
+
+    loop = _asyncio.new_event_loop()
+    _asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(_inner())
+    finally:
+        loop.close()
+        _asyncio.set_event_loop(None)
 
 
 async def refresh_cache():
@@ -237,40 +271,8 @@ async def refresh_cache():
     new_data: dict = {}
 
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process",
-                ],
-            )
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-            )
-
-            # Visit site first — Cloudflare issues cf_clearance to the browser context
-            log.info("Visiting ActiveSG to pass Cloudflare challenge...")
-            page = await context.new_page()
-            await page.goto(
-                f"https://activesg.gov.sg/facility-bookings/activities/{ACTIVITY_ID}/venues",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            await page.wait_for_timeout(3000)
-            await page.close()
-            log.info("Cloudflare passed — fetching all venues...")
-
-            results = await fetch_all_venues(context)
-            await browser.close()
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, _playwright_sync)
 
         for result in results:
             venue = result["venue"]
