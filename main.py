@@ -19,6 +19,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
+# Install Chromium at startup if not present (needed on Render)
+import subprocess as _sp
+import sys as _sys
+_sp.run([_sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
+        check=False, capture_output=False)
+
 SGT = ZoneInfo("Asia/Singapore")
 ACTIVITY_ID = "YLONatwvqJfikKOmB5N9U"
 BASE_URL = "https://activesg.gov.sg/api/trpc/schedule.listAvailable"
