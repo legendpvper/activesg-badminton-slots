@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ActiveSG Badminton Slot Finder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #f5f5f5;
+    --surface: #ffffff;
+    --border: #e0e0e0;
+    --border-strong: #c8c8c8;
+    --text: #1a1a1a;
+    --text-muted: #666;
+    --text-hint: #999;
+    --accent: #d32f2f;
+    --src-bg: #e3f2fd; --src-text: #0d47a1;
+    --dus-bg: #e8f5e9; --dus-text: #1b5e20;
+    --peak-bg: #fff3e0; --peak-text: #e65100;
+    --r: 10px; --rs: 6px;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; font-size: 15px; line-height: 1.5; }
+
+  header { background: var(--accent); color: white; padding: 18px 24px; }
+  header h1 { font-size: 19px; font-weight: 600; display: flex; align-items: center; gap: 9px; }
+  header p { font-size: 13px; opacity: 0.85; margin-top: 3px; }
+
+  .container { max-width: 860px; margin: 0 auto; padding: 20px 16px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 20px; margin-bottom: 16px; }
+
+  .fields { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  @media (max-width: 580px) { .fields { grid-template-columns: 1fr; } }
+
+  .field label { display: block; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; }
+  .field input, .field select { width: 100%; height: 38px; border: 1px solid var(--border-strong); border-radius: var(--rs); padding: 0 11px; font-size: 14px; color: var(--text); background: var(--surface); outline: none; }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
+
+  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+  .btn-primary { height: 38px; padding: 0 22px; background: var(--accent); color: white; border: none; border-radius: var(--rs); font-size: 14px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .btn-primary:hover { opacity: .88; }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+
+  .toggle { display: flex; border: 1px solid var(--border-strong); border-radius: var(--rs); overflow: hidden; height: 38px; }
+  .toggle button { flex: 1; border: none; background: var(--surface); color: var(--text-muted); font-size: 13px; font-weight: 500; cursor: pointer; padding: 0 13px; white-space: nowrap; }
+  .toggle button:not(:last-child) { border-right: 1px solid var(--border-strong); }
+  .toggle button.active { background: var(--text); color: white; }
+
+  .status { font-size: 12px; color: var(--text-hint); display: flex; align-items: center; gap: 6px; margin-top: 12px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #4caf50; flex-shrink: 0; }
+  .dot.warn { background: #ff9800; }
+  .dot.err { background: #f44336; }
+
+  .summary { display: flex; gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rs); padding: 10px 16px; flex: 1; }
+  .stat-label { font-size: 11px; color: var(--text-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+  .stat-value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+
+  .results { display: flex; flex-direction: column; gap: 10px; }
+  .venue-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 15px 18px; display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+  .venue-card:hover { border-color: var(--border-strong); }
+  .venue-main { flex: 1; min-width: 0; }
+  .venue-name { font-size: 15px; font-weight: 600; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .venue-addr { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; margin-bottom: 8px; }
+  .badge-src { background: var(--src-bg); color: var(--src-text); }
+  .badge-dus { background: var(--dus-bg); color: var(--dus-text); }
+  .slots { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pill { font-size: 12px; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg); color: var(--text); white-space: nowrap; }
+  .pill.peak { background: var(--peak-bg); border-color: #ffcc80; color: var(--peak-text); }
+  .btn-book { display: inline-block; padding: 6px 13px; border: 1px solid var(--border-strong); border-radius: var(--rs); font-size: 13px; font-weight: 500; color: var(--text); text-decoration: none; background: var(--surface); white-space: nowrap; }
+  .btn-book:hover { background: var(--bg); }
+
+  .empty { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 44px 24px; text-align: center; color: var(--text-muted); }
+  .empty .icon { font-size: 34px; margin-bottom: 10px; }
+  .empty p { font-size: 14px; }
+
+  .prog { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 14px; }
+  .prog-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .3s; }
+
+  footer { text-align: center; font-size: 12px; color: var(--text-hint); padding: 20px 16px; }
+  footer a { color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    ActiveSG Badminton Slot Finder
+  </h1>
+  <p>Find instant-bookable courts across all 120+ venues — updated every 10 minutes</p>
+</header>
+
+<div class="container">
+  <div class="card">
+    <div class="fields">
+      <div class="field"><label>Date</label><input type="date" id="date"></div>
+      <div class="field"><label>From</label><select id="start"><option value="">Any time</option></select></div>
+      <div class="field"><label>Until</label><select id="end"><option value="">Any time</option></select></div>
+    </div>
+    <div class="actions">
+      <button class="btn-primary" id="searchBtn" onclick="search()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Find slots
+      </button>
+      <div class="toggle">
+        <button class="active" onclick="setType(this,'')">All</button>
+        <button onclick="setType(this,'SRC')">Sport centres</button>
+        <button onclick="setType(this,'DUS')">School halls</button>
+      </div>
+    </div>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="statusTxt">Checking status...</span>
+    </div>
+  </div>
+
+  <div class="prog" id="prog" style="display:none"><div class="prog-fill" id="progFill" style="width:30%"></div></div>
+
+  <div class="summary" id="summary" style="display:none">
+    <div class="stat"><div class="stat-label">Venues with slots</div><div class="stat-value" id="sVenues">—</div></div>
+    <div class="stat"><div class="stat-label">Total timeslots</div><div class="stat-value" id="sSlots">—</div></div>
+    <div class="stat"><div class="stat-label">Data age</div><div class="stat-value" id="sAge" style="font-size:14px;padding-top:5px">—</div></div>
+  </div>
+
+  <div id="results">
+    <div class="empty"><div class="icon">🏸</div><p>Pick a date and tap <strong>Find slots</strong> to see available courts.</p></div>
+  </div>
+</div>
+
+<footer>
+  Data from <a href="https://activesg.gov.sg" target="_blank">ActiveSG</a>, refreshed every 10 min. Instant-bookable slots only. &nbsp;·&nbsp;
+  <a href="https://activesg.gov.sg/facility-bookings/activities/YLONatwvqJfikKOmB5N9U/venues" target="_blank">Book on ActiveSG ↗</a>
+</footer>
+
+<script>
+const AID = 'YLONatwvqJfikKOmB5N9U';
+let venueType = '';
+
+// Populate time selects
+['start','end'].forEach(id => {
+  const sel = document.getElementById(id);
+  for (let h = 6; h <= 23; h++) {
+    for (const m of [0, 30]) {
+      const t = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+      sel.innerHTML += `<option value="${t}">${t}</option>`;
+    }
+  }
+});
+
+// Default to tomorrow
+const tom = new Date();
+tom.setDate(tom.getDate() + 1);
+document.getElementById('date').value = tom.toISOString().split('T')[0];
+document.getElementById('date').min = new Date().toISOString().split('T')[0];
+document.getElementById('date').addEventListener('keydown', e => { if (e.key === 'Enter') search(); });
+
+loadStatus();
+
+function ago(iso) {
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  return `${Math.floor(s/3600)}h ago`;
+}
+
+async function loadStatus() {
+  try {
+    const d = await fetch('/api/status').then(r => r.json());
+    const dot = document.getElementById('dot');
+    const txt = document.getElementById('statusTxt');
+    if (d.error) {
+      dot.className = 'dot err';
+      txt.textContent = `Error: ${d.error}`;
+    } else if (d.last_refreshed) {
+      dot.className = 'dot';
+      txt.textContent = `Last updated ${ago(d.last_refreshed)} · ${d.total_venues} venues tracked · auto-refreshes every ${d.refresh_interval_minutes} min`;
+    } else {
+      dot.className = 'dot warn';
+      txt.textContent = 'Initialising data...';
+    }
+  } catch { document.getElementById('statusTxt').textContent = 'Status unavailable'; }
+}
+
+function setType(el, t) {
+  venueType = t;
+  document.querySelectorAll('.toggle button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+
+async function search() {
+  const date = document.getElementById('date').value;
+  if (!date) { alert('Please select a date.'); return; }
+  const start = document.getElementById('start').value;
+  const end = document.getElementById('end').value;
+
+  const btn = document.getElementById('searchBtn');
+  btn.disabled = true;
+  btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> Loading...`;
+
+  document.getElementById('prog').style.display = 'block';
+  document.getElementById('progFill').style.width = '60%';
+  document.getElementById('summary').style.display = 'none';
+  document.getElementById('results').innerHTML = '';
+
+  try {
+    let url = `/api/slots?date=${date}`;
+    if (start) url += `&start=${start}`;
+    if (end) url += `&end=${end}`;
+    if (venueType) url += `&type=${venueType}`;
+    const d = await fetch(url).then(r => r.json());
+
+    document.getElementById('progFill').style.width = '100%';
+    setTimeout(() => { document.getElementById('prog').style.display = 'none'; }, 300);
+    render(d);
+    loadStatus();
+  } catch {
+    document.getElementById('results').innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>Something went wrong. Please try again.</p></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Find slots`;
+  }
+}
+
+function fmt(price) {
+  const c = parseInt(price || '0');
+  return `$${Math.floor(c/100)}.${String(c%100).padStart(2,'0')}`;
+}
+
+function render(d) {
+  const sum = document.getElementById('summary');
+  sum.style.display = 'flex';
+  const total = d.results.reduce((s,v) => s + v.timeslots.length, 0);
+  document.getElementById('sVenues').textContent = d.total_venues;
+  document.getElementById('sSlots').textContent = total;
+  document.getElementById('sAge').textContent = d.last_refreshed ? ago(d.last_refreshed) : '—';
+
+  const el = document.getElementById('results');
+
+  if (d.error && !d.results.length) {
+    el.innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>${d.error}</p></div>`;
+    return;
+  }
+  if (!d.results.length) {
+    el.innerHTML = `<div class="empty"><div class="icon">😔</div><p>No instant-bookable slots on <strong>${d.date}</strong>.<br>Try a different date or remove the time filter.</p></div>`;
+    return;
+  }
+
+  const bookBase = `https://activesg.gov.sg/facility-bookings/activities/${AID}/venues`;
+  el.innerHTML = `<div class="results">${d.results.map(v => {
+    const bc = v.type === 'SRC' ? 'badge-src' : 'badge-dus';
+    const bl = v.type === 'SRC' ? 'Sport centre' : 'School hall';
+    const pills = v.timeslots.map(t =>
+      `<span class="pill${t.is_peak?' peak':''}">${t.start}–${t.end} · ${t.courts} court${t.courts>1?'s':''} · ${fmt(t.price)}</span>`
+    ).join('');
+    return `<div class="venue-card">
+      <div class="venue-main">
+        <div class="venue-name">${v.name}</div>
+        <div class="venue-addr">${v.address}</div>
+        <span class="badge ${bc}">${bl}</span>
+        <div class="slots">${pills}</div>
+      </div>
+      <div><a class="btn-book" href="${bookBase}" target="_blank">Book ↗</a></div>
+    </div>`;
+  }).join('')}</div>`;
+}
+</script>
+</body>
+</html>
