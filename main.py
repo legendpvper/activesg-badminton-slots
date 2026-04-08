@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 # Install Chromium at startup if not present (needed on Render)
 import subprocess as _sp
 import sys as _sys
-_sp.run([_sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"],
+_sp.run([_sys.executable, "-m", "playwright", "install", "chromium"],
         check=False, capture_output=False)
 
 SGT = ZoneInfo("Asia/Singapore")
@@ -209,10 +209,18 @@ def _playwright_sync() -> list[dict]:
 
     async def _inner():
         async with async_playwright() as p:
-            # No --single-process on Windows — causes premature browser close
+            import shutil as _shutil
             args = ["--no-sandbox", "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage", "--disable-gpu"]
-            browser = await p.chromium.launch(headless=True, args=args)
+            launch_kw: dict = {"headless": True, "args": args}
+            for candidate in ["google-chrome", "google-chrome-stable",
+                               "chromium-browser", "chromium"]:
+                path = _shutil.which(candidate)
+                if path:
+                    launch_kw["executable_path"] = path
+                    log.info(f"Using system browser: {path}")
+                    break
+            browser = await p.chromium.launch(**launch_kw)
             context = await browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
