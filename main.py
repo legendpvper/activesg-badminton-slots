@@ -1,11 +1,11 @@
 import json
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 
-from curl_cffi.requests import AsyncSession
+from playwright.async_api import async_playwright
 from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 SGT = ZoneInfo("Asia/Singapore")
 ACTIVITY_ID = "YLONatwvqJfikKOmB5N9U"
 BASE_URL = "https://activesg.gov.sg/api/trpc/schedule.listAvailable"
-CONCURRENCY = 12
+CONCURRENCY = 8
 REFRESH_INTERVAL_MINUTES = 10
 
 VENUES = [
@@ -183,45 +183,96 @@ cache: dict = {
 def ts_to_sgt(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=SGT).strftime("%H:%M")
 
-# ── Fetcher ───────────────────────────────────────────────────────────────────
+# ── Playwright fetcher ────────────────────────────────────────────────────────
 
-async def fetch_venue(session: AsyncSession, venue: dict, sem: asyncio.Semaphore) -> dict | None:
-    async with sem:
-        try:
-            payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
-            r = await session.get(
-                BASE_URL,
-                params={"input": payload},
-                timeout=15,
-                impersonate="chrome120",
-            )
-            if r.status_code != 200:
+async def fetch_all_venues(context) -> list[dict]:
+    """
+    Fire all venue API calls from within the browser context using page.evaluate().
+    The browser already has a valid cf_clearance cookie from the initial page visit,
+    so these fetch() calls pass Cloudflare without any issues.
+    """
+    sem = asyncio.Semaphore(CONCURRENCY)
+    page = await context.new_page()
+
+    async def fetch_one(venue: dict) -> dict | None:
+        async with sem:
+            try:
+                import urllib.parse
+                payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
+                url = f"{BASE_URL}?input={urllib.parse.quote(payload)}"
+                result = await page.evaluate(
+                    """async (url) => {
+                        try {
+                            const r = await fetch(url, {
+                                headers: { "Accept": "application/json" }
+                            });
+                            if (!r.ok) return null;
+                            return await r.json();
+                        } catch (e) {
+                            return null;
+                        }
+                    }""",
+                    url,
+                )
+                if not result:
+                    return None
+                raw = result.get("result", {}).get("data", {}).get("json", [])
+                return {"venue": venue, "slots": raw}
+            except Exception as e:
+                log.debug(f"Error fetching {venue['name']}: {e}")
                 return None
-            data = r.json()
-            raw = data.get("result", {}).get("data", {}).get("json", [])
-            return {"venue": venue, "slots": raw}
-        except Exception as e:
-            log.debug(f"Error fetching {venue['name']}: {e}")
-            return None
+
+    tasks = [fetch_one(v) for v in VENUES]
+    results = await asyncio.gather(*tasks)
+    await page.close()
+    return [r for r in results if r]
+
 
 async def refresh_cache():
     if cache["is_refreshing"]:
         return
     cache["is_refreshing"] = True
-    log.info("Starting cache refresh...")
+    log.info("Starting cache refresh via Playwright...")
     start = datetime.now(SGT)
-
-    sem = asyncio.Semaphore(CONCURRENCY)
     new_data: dict = {}
 
     try:
-        async with AsyncSession() as session:
-            tasks = [fetch_venue(session, v, sem) for v in VENUES]
-            results = await asyncio.gather(*tasks)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+
+            # Visit site first — Cloudflare issues cf_clearance to the browser context
+            log.info("Visiting ActiveSG to pass Cloudflare challenge...")
+            page = await context.new_page()
+            await page.goto(
+                f"https://activesg.gov.sg/facility-bookings/activities/{ACTIVITY_ID}/venues",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await page.wait_for_timeout(3000)
+            await page.close()
+            log.info("Cloudflare passed — fetching all venues...")
+
+            results = await fetch_all_venues(context)
+            await browser.close()
 
         for result in results:
-            if not result:
-                continue
             venue = result["venue"]
             for entry in result["slots"]:
                 date_str, slot_info = entry[0], entry[1]
@@ -266,6 +317,7 @@ async def lifespan(app: FastAPI):
     await refresh_cache()
     scheduler.add_job(refresh_cache, "interval", minutes=REFRESH_INTERVAL_MINUTES)
     scheduler.start()
+    log.info(f"Scheduler started — refreshing every {REFRESH_INTERVAL_MINUTES} minutes")
     yield
     scheduler.shutdown()
 
