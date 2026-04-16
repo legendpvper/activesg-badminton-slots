@@ -169,7 +169,13 @@ function ago(iso) {
 
 async function loadStatus() {
   try {
-    const d = await fetch('/api/status').then(r => r.json());
+    const r = await fetch('/api/status');
+    if (!r.ok) {
+      document.getElementById('dot').className = 'dot err';
+      document.getElementById('statusTxt').textContent = `HTTP ${r.status}: ${r.statusText}`;
+      return;
+    }
+    const d = await r.json();
     const dot = document.getElementById('dot');
     const txt = document.getElementById('statusTxt');
     if (d.error) {
@@ -177,12 +183,16 @@ async function loadStatus() {
       txt.textContent = `Error: ${d.error}`;
     } else if (d.last_refreshed) {
       dot.className = 'dot';
-      txt.textContent = `Last updated ${ago(d.last_refreshed)} · ${d.total_venues} venues tracked · auto-refreshes every ${d.refresh_interval_minutes} min`;
+      const venues = d.dates_cached?.length ? `${d.dates_cached.length} dates cached` : `${d.total_venues} venues tracked`;
+      txt.textContent = `Last updated ${ago(d.last_refreshed)} · ${venues} · auto-refreshes every ${d.refresh_interval_minutes} min`;
     } else {
       dot.className = 'dot warn';
       txt.textContent = 'Initialising data...';
     }
-  } catch { document.getElementById('statusTxt').textContent = 'Status unavailable'; }
+  } catch(e) {
+    document.getElementById('dot').className = 'dot err';
+    document.getElementById('statusTxt').textContent = `Cannot connect: ${e.message}`;
+  }
 }
 
 function setType(el, t) {
@@ -211,14 +221,19 @@ async function search() {
     if (start) url += `&start=${start}`;
     if (end) url += `&end=${end}`;
     if (venueType) url += `&type=${venueType}`;
-    const d = await fetch(url).then(r => r.json());
+    const r = await fetch(url);
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+    }
+    const d = await r.json();
 
     document.getElementById('progFill').style.width = '100%';
     setTimeout(() => { document.getElementById('prog').style.display = 'none'; }, 300);
     render(d);
     loadStatus();
-  } catch {
-    document.getElementById('results').innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>Something went wrong. Please try again.</p></div>`;
+  } catch (e) {
+    document.getElementById('prog').style.display = 'none';
+    document.getElementById('results').innerHTML = `<div class="empty"><div class="icon">⚠️</div><p>Failed to load slots: ${e.message}<br><small style="color:#999">The server may be initializing or experiencing issues.</small></p></div>`;
   } finally {
     btn.disabled = false;
     btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Find slots`;

@@ -191,22 +191,46 @@ def get_proxy() -> str | None:
         return f"http://{host}:{port}"
     return None
 
+# Warn if no proxy on startup (cloud IPs often blocked)
+if not get_proxy():
+    log.warning("No proxy configured! ActiveSG may block requests from cloud server IPs.")
+    log.warning("Set PROXY_URL or PROXY_HOST/PORT env vars to use a proxy.")
+
 # ── Fetcher ───────────────────────────────────────────────────────────────────
 
-async def fetch_venue(session: AsyncSession, venue: dict, sem: asyncio.Semaphore) -> dict | None:
+async def fetch_venue(session: AsyncSession, venue: dict, sem: asyncio.Semaphore, retry: int = 2) -> dict | None:
     async with sem:
-        try:
-            payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
-            r = await session.get(BASE_URL, params={"input": payload}, timeout=20)
-            if r.status_code != 200:
-                log.debug(f"HTTP {r.status_code} for {venue['name']}")
+        for attempt in range(retry + 1):
+            try:
+                payload = json.dumps({"json": {"venueId": venue["id"], "activityId": ACTIVITY_ID}})
+                r = await session.get(BASE_URL, params={"input": payload}, timeout=30)
+                if r.status_code == 200:
+                    data = r.json()
+                    raw = data.get("result", {}).get("data", {}).get("json", [])
+                    return {"venue": venue, "slots": raw}
+                elif r.status_code in (429, 503, 502, 520):
+                    # Rate limited or temporary error - retry
+                    if attempt < retry:
+                        wait = 2 ** attempt  # exponential backoff
+                        log.warning(f"HTTP {r.status_code} for {venue['name']}, retrying in {wait}s...")
+                        await asyncio.sleep(wait)
+                        continue
+                    log.warning(f"HTTP {r.status_code} for {venue['name']} after {retry} retries")
+                else:
+                    log.warning(f"HTTP {r.status_code} for {venue['name']}")
+                    return None
+            except asyncio.TimeoutError:
+                if attempt < retry:
+                    wait = 2 ** attempt
+                    log.warning(f"Timeout for {venue['name']}, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                log.warning(f"Timeout for {venue['name']} after {retry} retries")
                 return None
-            data = r.json()
-            raw = data.get("result", {}).get("data", {}).get("json", [])
-            return {"venue": venue, "slots": raw}
-        except Exception as e:
-            log.debug(f"Error fetching {venue['name']}: {e}")
-            return None
+            except Exception as e:
+                log.warning(f"Error fetching {venue['name']}: {type(e).__name__}: {str(e)[:100]}")
+                return None
+        return None
 
 async def refresh_cache():
     if cache["is_refreshing"]:
@@ -221,7 +245,7 @@ async def refresh_cache():
         masked = proxy.split("@")[-1] if "@" in proxy else proxy
         log.info(f"Using proxy: {masked}")
     else:
-        log.info("No proxy — direct connection")
+        log.info("No proxy configured — using direct connection")
 
     try:
         proxy_dict = {"http": proxy, "https": proxy} if proxy else None
@@ -263,8 +287,11 @@ async def refresh_cache():
         log.info(f"Cache refreshed in {elapsed:.1f}s — {ok}/{len(VENUES)} venues ok, {len(new_data)} dates cached")
 
     except Exception as e:
-        cache["error"] = str(e)
-        log.error(f"Cache refresh failed: {e}")
+        import traceback
+        error_msg = f"{type(e).__name__}: {str(e)[:200]}"
+        cache["error"] = error_msg
+        log.error(f"Cache refresh failed: {error_msg}")
+        log.error(traceback.format_exc())
     finally:
         cache["is_refreshing"] = False
 
@@ -310,14 +337,72 @@ async def get_slots(
 
 @app.get("/api/status")
 async def get_status():
-    return {"last_refreshed": cache["last_refreshed"], "is_refreshing": cache["is_refreshing"],
-            "dates_cached": sorted(cache["data"].keys()), "total_venues": len(VENUES),
-            "error": cache["error"], "refresh_interval_minutes": REFRESH_INTERVAL_MINUTES}
+    proxy = get_proxy()
+    masked_proxy = None
+    if proxy:
+        masked_proxy = proxy.split("@")[-1] if "@" in proxy else "configured"
+    return {
+        "last_refreshed": cache["last_refreshed"],
+        "is_refreshing": cache["is_refreshing"],
+        "dates_cached": sorted(cache["data"].keys()),
+        "total_venues": len(VENUES),
+        "error": cache["error"],
+        "refresh_interval_minutes": REFRESH_INTERVAL_MINUTES,
+        "proxy_configured": masked_proxy is not None,
+        "proxy_host": masked_proxy,
+    }
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
 
 @app.post("/api/refresh")
 async def trigger_refresh():
     asyncio.create_task(refresh_cache())
     return {"message": "Refresh triggered"}
+
+@app.get("/api/diag")
+async def diagnostics():
+    """Diagnostic endpoint to test connectivity and see what's failing."""
+    import platform
+    proxy = get_proxy()
+    results = {
+        "python_version": platform.python_version(),
+        "proxy_configured": proxy is not None,
+        "cache_status": {
+            "last_refreshed": cache["last_refreshed"],
+            "is_refreshing": cache["is_refreshing"],
+            "error": cache["error"],
+            "dates_cached": len(cache["data"]),
+        }
+    }
+
+    # Test a single venue fetch
+    test_venue = VENUES[0]  # Admiralty Primary School
+    try:
+        proxy_dict = {"http": proxy, "https": proxy} if proxy else None
+        async with AsyncSession(impersonate="chrome120", proxies=proxy_dict) as session:
+            payload = json.dumps({"json": {"venueId": test_venue["id"], "activityId": ACTIVITY_ID}})
+            r = await session.get(BASE_URL, params={"input": payload}, timeout=30)
+            results["test_fetch"] = {
+                "venue": test_venue["name"],
+                "status_code": r.status_code,
+                "success": r.status_code == 200,
+                "has_data": False,
+            }
+            if r.status_code == 200:
+                data = r.json()
+                raw = data.get("result", {}).get("data", {}).get("json", [])
+                results["test_fetch"]["has_data"] = len(raw) > 0
+                results["test_fetch"]["dates_found"] = len(raw)
+    except Exception as e:
+        results["test_fetch"] = {
+            "venue": test_venue["name"],
+            "error": f"{type(e).__name__}: {str(e)[:200]}",
+            "success": False,
+        }
+
+    return results
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
