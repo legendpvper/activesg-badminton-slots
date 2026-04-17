@@ -177,7 +177,8 @@ cache: dict = {"data": {}, "last_refreshed": None, "is_refreshing": False, "erro
 def ts_to_sgt(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=SGT).strftime("%H:%M")
 
-def get_proxy() -> str | None:
+from typing import Optional
+def get_proxy() -> Optional[str]:
     full = os.environ.get("PROXY_URL")
     if full:
         return full
@@ -198,7 +199,7 @@ if not get_proxy():
 
 # ── Fetcher ───────────────────────────────────────────────────────────────────
 
-async def fetch_venue(session: AsyncSession, venue: dict, sem: asyncio.Semaphore, retry: int = 2) -> dict | None:
+async def fetch_venue(session: AsyncSession, venue: dict, sem: asyncio.Semaphore, retry: int = 2) -> Optional[dict]:
     async with sem:
         for attempt in range(retry + 1):
             try:
@@ -314,9 +315,9 @@ app = FastAPI(title="ActiveSG Badminton Slot Finder", lifespan=lifespan)
 @app.get("/api/slots")
 async def get_slots(
     date: str = Query(...),
-    start: str | None = Query(None),
-    end: str | None = Query(None),
-    type: str | None = Query(None),
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
 ):
     day_data = cache["data"].get(date, [])
     results = []
