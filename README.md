@@ -29,6 +29,10 @@ Open http://localhost:8000
 
 > **Note:** ActiveSG blocks requests from cloud provider IPs. A proxy is required when hosting on Render or similar platforms. See [DEPLOY.md](DEPLOY.md) for setup instructions and debugging tips.
 
+## Live Demo
+
+http://activesg-slots.duckdns.org:8000
+
 ## API
 
 | Endpoint | Description |
